@@ -1,0 +1,150 @@
+golang(이하 go)으로 작성된 애플리케이션을 Docker로 만들다가 문득 "go로 작성된 애플리케이션은 단독으로 실행할 수 있는 파일이 만들어지니까, 만약 빌드된 파일만 배포하여도 실행이 될까?"라는 궁금증이 생겼습니다. 그래서 몇 가지를 해봤습니다. 
+
+ 
+
+* 사용했던 코드는 Docker image를 만들었던 코드는 주제와 관계 없는 내용이 담겨있어 오히려 내용을 이해하는 데, 방해되기 때문에 간단히 Hello World를 출력하는 코드로 대신합니다. 
+
+ 
+
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Printf("hello, world\n")
+}
+간단히 빌드를 하고나면 2.1 메가 짜리 실행 가능한 파일이 생깁니다. 
+
+$ go build main.go
+$ ls -alh
+total 4272
+drwxr-xr-x   4 macisblue  staff   128B  5 19 22:34 .
+drwxr-xr-x  34 macisblue  staff   1.1K  5 19 22:33 ..
+-rwxr-xr-x   1 macisblue  staff   2.1M  5 19 22:36 main
+-rw-r--r--   1 macisblue  staff    74B  5 19 22:35 main.go
+$ ./main
+hello, world
+ 
+
+이 과정을 Dockerfile로 구현하면 아래 코드와 같습니다. 
+
+FROM golang:alpine
+
+ADD . .
+
+RUN go build main.go
+CMD ["./main"]
+ 
+
+이미지를 빌드 하면 Docker image가 만들어집니다. 
+
+$ docker build -t go-main:t1 .
+
+Sending build context to Docker daemon  2.186MB
+Step 1/4 : FROM golang:alpine
+alpine: Pulling from library/golang
+cbdbe7a5bc2a: Pull complete
+408f87550127: Pull complete
+fe522b08c979: Pull complete
+246889057fdc: Pull complete
+526388c839c0: Pull complete
+Digest: sha256:d3a08e6a81ef8f25c7b9f4b8f2990fe76790f057ef7f8053e8884511ddd81756
+Status: Downloaded newer image for golang:alpine
+ ---> 459ae5e869df
+Step 2/4 : ADD . .
+ ---> fc1ec17c134f
+Step 3/4 : RUN go build main.go
+ ---> Running in 09ca3f331714
+Removing intermediate container 09ca3f331714
+ ---> 47017c3500c8
+Step 4/4 : CMD ["./main"]
+ ---> Running in f02246e1a541
+Removing intermediate container f02246e1a541
+ ---> 8869e6b7416d
+Successfully built 8869e6b7416d
+Successfully tagged go-main:t1
+
+$ docker images | grep go-main
+
+go-main             t1                  8869e6b7416d        About a minute ago   374MB
+헬로 월드를 찍는 374 메가 짜리 이미지가 만들어졌습니다. 물론 "hello world"도 잘 찍습니다. 
+
+$ docker run go-main:t1
+
+hello, world
+ 
+
+그러면 아까 들었던 생각을 구현해봅니다. 빌드를 먼저 하고 빌드된 파일만 따로 도커 이미지로 만드는 겁니다. 도커 파일을 다음과 같이 수정했습니다. 
+
+FROM golang:alpine
+
+ADD main .
+
+CMD ["./main"]
+그리고 빌드된 이미지를 빌드하고, 아까 만들어진 이미지와 비교해 봤습니다.  
+
+$ docker build -t go-main:t2 .
+Sending build context to Docker daemon  2.186MB
+Step 1/3 : FROM golang:alpine
+ ---> 459ae5e869df
+Step 2/3 : ADD main .
+ ---> 9e973fa6a7a3
+Step 3/3 : CMD ["./main"]
+ ---> Running in ee16c64682dd
+Removing intermediate container ee16c64682dd
+Successfully tagged go-main:t2
+
+$ docker images 
+docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+go-main             t2                  9d59a189d59e        7 minutes ago       372MB
+go-main             t1                  8869e6b7416d        14 minutes  ago     374MB
+처음 만들었던 이미지에 비해서 2Mb가 줄어들었음을 알 수 있었습니다.
+
+ 
+
+이번에는 멀티스테이지 빌드로 동일하게 해봤습니다. 빌드를 따로 해서 복사하지 않고 이미지 빌드와 동시에 go 빌드를 하고 결과물만 이미지에 담는 것입니다. Dockerfile을 다시 변경했습니다. 
+
+FROM golang:alpine AS builder
+
+ADD main.go .
+
+RUN go build main.go
+
+FROM golang:alpine
+
+COPY --from=builder /go/main /go/main
+
+CMD ["./main"]
+ 
+
+그리고 다시 이미지를 확인해 봤습니다. 
+
+$ docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+go-main             t3                  6a486aec8c85        3 minutes ago       372MB
+go-main             t2                  9d59a189d59e        27 minutes ago      372MB
+실망스럽게도 두번째로 빌드한 t2와 차이가 없습니다. 조금 더 생각해보니, go는 라이브러리 없이 스스로 동작하는 앱으로 빌드를 해주니, 앱이 실행되는 환경에는 go 라이브러리가 필요 없지 않을까 싶었습니다. 그래서 두 번째 단계에서 이미지를 빌드할 때 베이스 이미지를 alpine으로 변경해봤습니다. 
+
+FROM golang:alpine AS builder
+
+ADD main.go .
+
+RUN go build main.go
+
+FROM alpine
+
+COPY --from=builder /go/main /go/main
+
+CMD ["./main"]
+alpine이미지는 알파인 리눅스를 실행할 수 있는 가장 작은 이미지를 말합니다. Dockerfile에는 두번째 단계에서 베이스 이미지를 alpine으로 변경한 것 외에는 없습니다. 다시 빌드된 이미지의 크기를 비교해보면, 
+
+$ docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED              SIZE
+go-main             t4                  f5cf012d5a1e        About a minute ago   7.69MB
+go-main             t3                  6a486aec8c85        10 minutes ago       372MB
+방금 전에 만들었던 t3이미지와는 비교도 되지 않을 만큼 작아졌습니다. 그렇다면 정말 실행 될까요?
+
+$ docker run go-main:t4
+hello, world
+됩니다!! 처음 시작을 374MB에서 약 8MB의 동일한 일을 하는 결과물을 얻었습니다
